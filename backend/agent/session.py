@@ -1,6 +1,6 @@
-from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field
+from enum import Enum
 
 
 class Difficulty(str, Enum):
@@ -21,11 +21,6 @@ class StepTrace(BaseModel):
     error: Optional[str] = None
 
 
-class TurnTrace(BaseModel):
-    turn_number: int
-    steps: list[StepTrace] = Field(default_factory=list)
-
-
 class ChainSession(BaseModel):
     game_id: str
     username: str
@@ -36,8 +31,7 @@ class ChainSession(BaseModel):
     last_letter: Optional[str] = None
     cascade_streak: int = 0
     game_status: str = "active"  # active | ended | error | quit
-    turn_traces: list[TurnTrace] = Field(default_factory=list)
+    step_traces: list[StepTrace] = Field(default_factory=list)
     validation_retries: int = 0
     creativity_retries: int = 0
     ai_move_retries: int = 0
-
