@@ -1,4 +1,5 @@
 fastapi[standard]
+mcp[cli]
 pydantic=2.13.4
 python-dotenv=1.2.2
 sqlalchemy=2.0.51
