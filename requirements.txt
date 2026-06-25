@@ -1,1 +1,5 @@
-pydantic==2.13.4
+fastapi[standard]
+pydantic=2.13.4
+python-dotenv=1.2.2
+sqlalchemy=2.0.51
+supabase=2.31.0
