@@ -107,6 +107,7 @@ def play_turn(session: ChainSession, player_word: str) -> tuple[ChainSession, di
         }
     )
     if not ok:
+        session.validation_retries += 1
         session.game_status = "ended"
         return session, {"valid": False, "reason": reason}
 
@@ -114,6 +115,10 @@ def play_turn(session: ChainSession, player_word: str) -> tuple[ChainSession, di
     t2 = time.time()
     is_creative, creativity_reason, llm_meta = judge_creativity(session, player_word)
     t3 = time.time()
+
+    if "error" in llm_meta:
+        session.creativity_retries += 1
+
     creativity_trace = {
         "step_name": "creativity",
         "start_ts": t2,
