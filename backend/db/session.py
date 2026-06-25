@@ -1,21 +1,10 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 import os
+from supabase import create_client, Client
 
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL environment variable is not set")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be set")
 
-# Sync engine for Supabase Postgres
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-
-def get_db():
-    """FastAPI dependency that yields a database session."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
