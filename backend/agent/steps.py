@@ -4,18 +4,12 @@ from typing import Tuple
 from backend.agent.session import ChainSession, Difficulty
 from backend.game.core import score_word
 from backend.mcp_tools.game_tools import word_lookup_tool
+from backend.llm.openrouter_client import call_openrouter
+from backend.observability.logging import log_llm_call
 
 
 def validate_player_word(session: ChainSession, player_word: str) -> Tuple[bool, str]:
-    """Validate the player's word using structural rules and Supabase word_list.
-
-    Rules:
-    - Non-empty, max length 50
-    - Alphabetic characters only
-    - Must start with last_letter if present
-    - Must not be reused
-    - Must exist in word_list (via word_lookup_tool)
-    """
+    """Validate the player's word using structural rules and Supabase word_list."""
     w = (player_word or "").strip()
     if not w:
         return False, "empty or whitespace word"
@@ -35,31 +29,51 @@ def validate_player_word(session: ChainSession, player_word: str) -> Tuple[bool,
     return True, "ok"
 
 
-def judge_creativity(session: ChainSession, player_word: str) -> Tuple[bool, str]:
-    """Judge creativity based on frequency rank from Supabase word_list.
+def judge_creativity(session: ChainSession, player_word: str) -> Tuple[bool, str, dict]:
+    """Judge creativity based on frequency rank, with optional LLM explanation.
 
-    Heuristic:
-    - If freq_rank missing, fall back to length-based rule (len > 6).
-    - EASY   : creative if freq_rank > 1000
-    - MEDIUM : creative if freq_rank > 5000
-    - HARD   : creative if freq_rank > 10000
+    Returns (is_creative, reason, llm_meta).
     """
     w = (player_word or "").strip()
     lookup = word_lookup_tool(w)
     freq = lookup.get("freq_rank")
 
+    # Heuristic: thresholds by difficulty
     if freq is None:
         creative = len(w) > 6
-        return creative, "length-based fallback"
+        reason = "length-based fallback"
+    else:
+        if session.difficulty == Difficulty.EASY:
+            creative = freq > 1000
+        elif session.difficulty == Difficulty.MEDIUM:
+            creative = freq > 5000
+        else:  # HARD
+            creative = freq > 10000
+        reason = f"freq_rank={freq}"
 
-    if session.difficulty == Difficulty.EASY:
-        creative = freq > 1000
-    elif session.difficulty == Difficulty.MEDIUM:
-        creative = freq > 5000
-    else:  # HARD
-        creative = freq > 10000
+    llm_meta: dict = {}
 
-    return creative, f"freq_rank={freq}"
+    # Optional LLM call for explanation; guard if key not set
+    try:
+        explanation, tokens_in, tokens_out, usd_cost, latency_ms = call_openrouter(
+            prompt=(
+                f"In one short sentence, explain why the word '{w}' is "
+                f"{'creative' if creative else 'not very creative'} "
+                f"for difficulty {session.difficulty.value} given freq_rank={freq}."
+            ),
+            system_prompt="You are a concise word-game judge.",
+        )
+        llm_meta = {
+            "explanation": explanation,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "usd_cost": usd_cost,
+            "latency_ms": latency_ms,
+        }
+    except Exception as exc:  # noqa: BLE001
+        llm_meta = {"error": str(exc)}
+
+    return creative, reason, llm_meta
 
 
 def generate_ai_move(session: ChainSession, last_player_word: str) -> str:
@@ -96,20 +110,47 @@ def play_turn(session: ChainSession, player_word: str) -> tuple[ChainSession, di
         session.game_status = "ended"
         return session, {"valid": False, "reason": reason}
 
-    # Step 2: creativity judgement
+    # Step 2: creativity judgement + LLM explanation
     t2 = time.time()
-    is_creative, creativity_reason = judge_creativity(session, player_word)
+    is_creative, creativity_reason, llm_meta = judge_creativity(session, player_word)
     t3 = time.time()
-    session.step_traces.append(
-        {
-            "step_name": "creativity",
-            "start_ts": t2,
-            "end_ts": t3,
-            "latency_ms": int((t3 - t2) * 1000),
-            "outcome": "ok",
-            "payload": {"reason": creativity_reason},
-        }
-    )
+    creativity_trace = {
+        "step_name": "creativity",
+        "start_ts": t2,
+        "end_ts": t3,
+        "latency_ms": int((t3 - t2) * 1000),
+        "outcome": "ok",
+        "payload": {"reason": creativity_reason, **({} if "explanation" not in llm_meta else {"explanation": llm_meta["explanation"]})},
+    }
+
+    # Attach LLM metrics if available
+    if "tokens_in" in llm_meta:
+        creativity_trace["tokens_in"] = llm_meta["tokens_in"]
+    if "tokens_out" in llm_meta:
+        creativity_trace["tokens_out"] = llm_meta["tokens_out"]
+    if "usd_cost" in llm_meta:
+        creativity_trace["usd_cost"] = llm_meta["usd_cost"]
+    if "latency_ms" in llm_meta:
+        # Overwrite latency_ms with LLM latency if present
+        creativity_trace["latency_ms"] = llm_meta["latency_ms"]
+
+    session.step_traces.append(creativity_trace)
+
+    # Log LLM call if it succeeded
+    if "explanation" in llm_meta and "tokens_in" in llm_meta:
+        log_llm_call(
+            {
+                "game_id": session.game_id,
+                "turn": turn_number,
+                "step_name": "creativity",
+                "model": os.getenv("OPENROUTER_MODEL"),
+                "tokens_in": llm_meta["tokens_in"],
+                "tokens_out": llm_meta["tokens_out"],
+                "latency_ms": llm_meta["latency_ms"],
+                "usd_cost": llm_meta["usd_cost"],
+                "prompt_summary": f"creativity explanation for '{player_word}'",
+            }
+        )
 
     if is_creative:
         session.cascade_streak += 1
@@ -145,6 +186,7 @@ def play_turn(session: ChainSession, player_word: str) -> tuple[ChainSession, di
         "ai_word": ai_word,
         "is_creative": is_creative,
         "creativity_reason": creativity_reason,
+        "llm_explanation": llm_meta.get("explanation"),
         "score_breakdown": {
             "base": breakdown.base,
             "creative_bonus": breakdown.creative_bonus,
