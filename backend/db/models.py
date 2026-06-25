@@ -4,7 +4,7 @@ from sqlalchemy import (
     String,
     DateTime,
     Numeric,
-    BigInteger,
+    BigInteger, Text
     Text,
     JSON,
     ForeignKey,
