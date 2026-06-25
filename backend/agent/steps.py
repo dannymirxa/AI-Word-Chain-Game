@@ -1,11 +1,21 @@
 import time
 from typing import Tuple
 
-from backend.agent.session import ChainSession
+from backend.agent.session import ChainSession, Difficulty
 from backend.game.core import score_word
+from backend.mcp_tools.game_tools import word_lookup_tool
 
 
 def validate_player_word(session: ChainSession, player_word: str) -> Tuple[bool, str]:
+    """Validate the player's word using structural rules and Supabase word_list.
+
+    Rules:
+    - Non-empty, max length 50
+    - Alphabetic characters only
+    - Must start with last_letter if present
+    - Must not be reused
+    - Must exist in word_list (via word_lookup_tool)
+    """
     w = (player_word or "").strip()
     if not w:
         return False, "empty or whitespace word"
@@ -17,14 +27,39 @@ def validate_player_word(session: ChainSession, player_word: str) -> Tuple[bool,
         return False, "word does not start with required letter"
     if w.lower() in {u.lower() for u in session.used_words}:
         return False, "word already used"
+
+    lookup = word_lookup_tool(w)
+    if not lookup.get("valid"):
+        return False, lookup.get("reason", "not_in_dictionary")
+
     return True, "ok"
 
 
 def judge_creativity(session: ChainSession, player_word: str) -> Tuple[bool, str]:
+    """Judge creativity based on frequency rank from Supabase word_list.
+
+    Heuristic:
+    - If freq_rank missing, fall back to length-based rule (len > 6).
+    - EASY   : creative if freq_rank > 1000
+    - MEDIUM : creative if freq_rank > 5000
+    - HARD   : creative if freq_rank > 10000
+    """
     w = (player_word or "").strip()
-    if len(w) > 6:
-        return True, "length-based creative placeholder"
-    return False, "non-creative placeholder"
+    lookup = word_lookup_tool(w)
+    freq = lookup.get("freq_rank")
+
+    if freq is None:
+        creative = len(w) > 6
+        return creative, "length-based fallback"
+
+    if session.difficulty == Difficulty.EASY:
+        creative = freq > 1000
+    elif session.difficulty == Difficulty.MEDIUM:
+        creative = freq > 5000
+    else:  # HARD
+        creative = freq > 10000
+
+    return creative, f"freq_rank={freq}"
 
 
 def generate_ai_move(session: ChainSession, last_player_word: str) -> str:
@@ -63,7 +98,7 @@ def play_turn(session: ChainSession, player_word: str) -> tuple[ChainSession, di
 
     # Step 2: creativity judgement
     t2 = time.time()
-    is_creative, _ = judge_creativity(session, player_word)
+    is_creative, creativity_reason = judge_creativity(session, player_word)
     t3 = time.time()
     session.step_traces.append(
         {
@@ -72,6 +107,7 @@ def play_turn(session: ChainSession, player_word: str) -> tuple[ChainSession, di
             "end_ts": t3,
             "latency_ms": int((t3 - t2) * 1000),
             "outcome": "ok",
+            "payload": {"reason": creativity_reason},
         }
     )
 
@@ -108,6 +144,7 @@ def play_turn(session: ChainSession, player_word: str) -> tuple[ChainSession, di
         "player_word": player_word,
         "ai_word": ai_word,
         "is_creative": is_creative,
+        "creativity_reason": creativity_reason,
         "score_breakdown": {
             "base": breakdown.base,
             "creative_bonus": breakdown.creative_bonus,
